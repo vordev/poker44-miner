@@ -28,8 +28,15 @@ fi
 pm2 delete $PM2_NAME 2>/dev/null || true
 
 export PYTHONPATH="$(pwd)"
+
+# bittensor 10.x makes CLI arg parsing opt-in. Without this, bt.Config ignores every
+# --flag (wallet/netuid/neuron/axon), leaving config.neuron=None and crashing
+# check_config at startup. Must be exported so the pm2-spawned process inherits it.
 export BT_NO_PARSE_CLI_ARGS=false
-export BT_NO_PARSE_CLI_ARGS=false
+
+# Optional: capture unlabeled live queries for drift diagnosis (no-op unless =1).
+# Exported here so the pm2-spawned miner inherits it.
+export POKER44_CAPTURE="${POKER44_CAPTURE:-}"
 
 # --- Model manifest identity (published to validators for transparency/compliance) ---
 # Auto-derived from git; override by exporting these before running the script.

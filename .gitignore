@@ -216,3 +216,7 @@ wandb/
 # Poker44 miner training toolkit: cached benchmark data + model artifacts (do not commit)
 benchmark_cache/
 miner_training/*.pkl
+# Local deployment config (wallet/IP); publish miner.env.example, never miner.env
+scripts/miner/miner.env
+# Captured live validator queries (unlabeled, local-only diagnostics)
+live_capture/

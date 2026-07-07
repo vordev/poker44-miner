@@ -43,6 +43,16 @@ pip install lightgbm
 python -c "import lightgbm; print('lightgbm', lightgbm.__version__)"
 ok "LightGBM ready"
 
+# The pinned bittensor-cli pulls in `scalecodec`, which collides with the `cyscale`
+# used by the bittensor SDK's async-substrate-interface and breaks `import bittensor`.
+# Keep cyscale (the SDK needs it); the miner host does not need bittensor-cli.
+info "Resolving scale-codec namespace conflict..."
+pip uninstall -y scalecodec cyscale >/dev/null 2>&1 || true
+pip install --force-reinstall cyscale
+python -c "import bittensor; print('bittensor import OK:', bittensor.__version__)" \
+  || err "bittensor still fails to import after conflict fix."
+ok "bittensor import verified"
+
 if [ "${SETUP_FIREWALL:-0}" = "1" ]; then
   PORT="${AXON_PORT:-8091}"
   info "Configuring ufw (SSH first, then axon $PORT)..."

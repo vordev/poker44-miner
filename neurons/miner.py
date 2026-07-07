@@ -151,6 +151,13 @@ class Miner(BaseMinerNeuron):
         synapse.risk_scores = scores
         synapse.predictions = [s >= 0.5 for s in scores]
         synapse.model_manifest = dict(self.model_manifest)
+        # Optional, fail-safe: capture the unlabeled live queries for drift analysis
+        # (no-op unless POKER44_CAPTURE=1). Never affects the response.
+        try:
+            from miner_training.live_capture import capture_chunks
+            capture_chunks(chunks, scores)
+        except Exception:
+            pass
         bt.logging.info(f"Scored {len(chunks)} chunks with {source}.")
         return synapse
 
