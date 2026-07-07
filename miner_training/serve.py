@@ -31,23 +31,31 @@ class ModelScorer:
     def __init__(self, model_path: str = "miner_training/model.pkl") -> None:
         self.model = None
         self.feature_names: List[str] = FEATURE_NAMES
+        self._idx: List[int] = list(range(len(FEATURE_NAMES)))
         path = Path(model_path)
         if path.exists():
             with path.open("rb") as fh:
                 blob = pickle.load(fh)
             self.model = blob["model"]
             self.feature_names = blob.get("feature_names", FEATURE_NAMES)
-            if self.feature_names != FEATURE_NAMES:
+            # A drift-selected model uses only a SUBSET of features; map its feature
+            # names to positions in the current full feature vector.
+            try:
+                self._idx = [FEATURE_NAMES.index(n) for n in self.feature_names]
+            except ValueError as exc:
                 raise ValueError(
-                    "Feature schema drift: the saved model's feature_names do not match "
-                    "the current features.py. Retrain, or pin features.py to the trained version."
-                )
+                    f"Saved model expects a feature not in the current features.py ({exc}). "
+                    "Retrain, or pin features.py to the trained version."
+                ) from exc
+
+    def _vec(self, group: List[dict]) -> List[float]:
+        full = extract_features(group)
+        return [full[i] for i in self._idx]
 
     def score_chunk(self, group: List[dict]) -> float:
         if self.model is None:
             return 0.5
-        vec = extract_features(group)
-        proba = self.model.predict_proba([vec])[0][1]
+        proba = self.model.predict_proba([self._vec(group)])[0][1]
         return round(float(min(1.0, max(0.0, proba))), 6)
 
     def score_chunks(self, chunks: List[List[dict]]) -> List[float]:
@@ -56,7 +64,7 @@ class ModelScorer:
             return [0.5 for _ in chunks]
         if not chunks:
             return []
-        matrix = [extract_features(g) for g in chunks]
+        matrix = [self._vec(g) for g in chunks]
         proba = self.model.predict_proba(matrix)[:, 1]
         return [round(float(min(1.0, max(0.0, p))), 6) for p in proba]
 

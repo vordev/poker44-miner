@@ -64,14 +64,42 @@ def _evaluate(model, X: np.ndarray, y: np.ndarray, label: str) -> float:
     return rew
 
 
-def _top_importances(model, k: int = 20) -> None:
+def _top_importances(model, names, k: int = 20) -> None:
     imp = getattr(model, "feature_importances_", None)
     if imp is None:
         return
     order = np.argsort(imp)[::-1][:k]
     print(f"\nTop {k} features:")
     for i in order:
-        print(f"  {FEATURE_NAMES[i]:24s} {imp[i]:.4f}")
+        print(f"  {names[i]:24s} {imp[i]:.4f}")
+
+
+def _drift_select(X_full: np.ndarray, capture_path: str, max_drift: float):
+    """Keep only features whose distribution is stable benchmark->live (low mean shift)."""
+    from miner_training.gap_diagnose import _load_live
+
+    L, _ = _load_live(capture_path)
+    if len(L) == 0:
+        print(f"  --robust: no live captures at {capture_path!r}; keeping ALL {len(FEATURE_NAMES)} features.")
+        return list(range(len(FEATURE_NAMES))), list(FEATURE_NAMES)
+    keep_idx, keep_names, dropped = [], [], []
+    for i, name in enumerate(FEATURE_NAMES):
+        b = X_full[:, i]
+        sd = b.std() or 1.0
+        shift = abs((L[:, i].mean() - b.mean()) / sd)
+        if shift <= max_drift:
+            keep_idx.append(i)
+            keep_names.append(name)
+        else:
+            dropped.append((shift, name))
+    dropped.sort(reverse=True)
+    print(f"  --robust: kept {len(keep_idx)}/{len(FEATURE_NAMES)} stable features (|shift|<={max_drift}) "
+          f"from {len(L)} live chunks; dropped {len(dropped)} drifting.")
+    if dropped:
+        print("    top dropped:", ", ".join(n for _, n in dropped[:8]))
+    if len(keep_idx) < 5:
+        print("    WARNING: very few features survived; raise --max-drift.")
+    return keep_idx, keep_names
 
 
 def main() -> None:
@@ -93,6 +121,12 @@ def main() -> None:
     ap.add_argument("--out", default="miner_training/model.pkl")
     ap.add_argument("--half-life", type=float, default=10.0,
                     help="recency half-life in days (older release dates get exponentially less weight)")
+    ap.add_argument("--robust", action="store_true",
+                    help="drift-aware: use captured live queries to DROP features that don't transfer to live")
+    ap.add_argument("--capture", default="live_capture/live_chunks.jsonl",
+                    help="captured live queries for --robust drift selection")
+    ap.add_argument("--max-drift", type=float, default=1.0,
+                    help="with --robust, keep features whose |mean shift| vs live is <= this")
     args = ap.parse_args()
 
     if args.use_all:
@@ -133,6 +167,15 @@ def main() -> None:
             X, y, xdates, test_size=args.holdout_frac, stratify=y, random_state=0
         )
 
+    # Drift-aware feature selection: drop features that don't transfer benchmark->live.
+    selected_names = list(FEATURE_NAMES)
+    if args.robust:
+        print("\nDrift-aware feature selection (--robust):")
+        sel_idx, selected_names = _drift_select(X, args.capture, args.max_drift)
+        X = X[:, sel_idx]
+        if Xval is not None:
+            Xval = Xval[:, sel_idx]
+
     # Recency-weight the training rows: recent release dates count more (bots evolve).
     ref_train = max(xdates.tolist())
     w = recency_weights(xdates.tolist(), ref_train, half_life_days=args.half_life)
@@ -148,7 +191,7 @@ def main() -> None:
     held_out_reward = None
     if Xval is not None and yval is not None and len(yval):
         held_out_reward = _evaluate(model, Xval, yval, "val (held-out)")
-    _top_importances(model)
+    _top_importances(model, selected_names)
 
     # Decide which model to persist. In --all mode (or with --fit-all) we refit a
     # fresh model on train+val so the deployed model uses every labeled example;
@@ -171,7 +214,7 @@ def main() -> None:
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("wb") as fh:
-        pickle.dump({"model": save_model, "feature_names": FEATURE_NAMES}, fh)
+        pickle.dump({"model": save_model, "feature_names": selected_names}, fh)
     print(f"Saved model -> {out_path}")
 
 

@@ -26,12 +26,13 @@ PYBIN="${PYBIN:-python}"
 # shellcheck disable=SC1091
 [ -f scripts/miner/miner.env ] && source scripts/miner/miner.env
 
-MIN_REWARD=""; FORCE=0; DO_PUSH=1
+MIN_REWARD=""; FORCE=0; DO_PUSH=1; ROBUST=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --min-reward) MIN_REWARD="${2:?}"; shift 2;;
     --force) FORCE=1; shift;;
     --no-push) DO_PUSH=0; shift;;
+    --robust) ROBUST="--robust"; shift;;  # drift-select features from live captures
     -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 1;;
   esac
@@ -47,7 +48,7 @@ export ALLOWED_VALIDATOR_HOTKEYS="${ALLOWED_VALIDATOR_HOTKEYS:-}"
 
 echo "== [1/5] retrain on the latest benchmark =="
 LOG="$(mktemp)"
-$PYBIN -m miner_training.train --all --force-download 2>&1 | tee "$LOG"
+$PYBIN -m miner_training.train --all --force-download $ROBUST 2>&1 | tee "$LOG"
 REWARD="$(grep 'val (held-out)' "$LOG" | grep -oE 'subnet_reward=[0-9.]+' | grep -oE '[0-9.]+' | tail -1 || true)"
 echo "held-out reward: ${REWARD:-unknown}"
 
