@@ -97,17 +97,23 @@ def main() -> None:
     if len(L) < 30:
         print(f"NOTE: only {len(L)} live chunks — trust the mean-shift ranking, ignore PSI until you have ~30+.\n")
 
-    # ---- 1. MODEL GAP: score distribution benchmark vs live ----
+    # ---- 1. MODEL GAP: run the CURRENT model on benchmark vs live captures ----
     mp = Path(args.model)
     if mp.exists():
-        model = pickle.load(mp.open("rb"))["model"]
-        pB = model.predict_proba(B)[:, 1]
-        print("MODEL score distribution:")
+        blob = pickle.load(mp.open("rb"))
+        model = blob["model"]
+        names = blob.get("feature_names", FEATURE_NAMES)
+        idx = [FEATURE_NAMES.index(n) for n in names]  # model may use a feature SUBSET
+        pB = model.predict_proba(B[:, idx])[:, 1]
+        pL = model.predict_proba(L[:, idx])[:, 1]
+        collapsed = pL.std() < 0.10
+        print(f"CURRENT model ({len(names)} features) score distribution:")
         print(f"  benchmark: {_dist(pB)}")
+        print(f"  live     : {_dist(pL)}"
+              + ("  <-- STILL COLLAPSED (not discriminating live)" if collapsed else "  <-- DISCRIMINATING live"))
         if live_scores:
             s = np.asarray(live_scores)
-            tag = "  <-- COLLAPSED (not discriminating live)" if s.std() < 0.10 else ""
-            print(f"  live     : {_dist(s)}{tag}")
+            print(f"  (as served when captured: mean={s.mean():.3f} std={s.std():.3f})")
         print()
 
     # ---- 2. FEATURE DRIFT: standardized mean shift (primary), PSI (secondary) ----
