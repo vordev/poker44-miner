@@ -18,6 +18,7 @@ them are unit-free (bb cancels).
 from __future__ import annotations
 
 import math
+from collections import Counter
 from typing import Dict, List, Sequence
 
 STREETS = ("preflop", "flop", "turn", "river")
@@ -370,17 +371,192 @@ def _extra_dict(group: List[dict]) -> Dict[str, float]:
     return d
 
 
+def _sequence_dict(group: List[dict]) -> Dict[str, float]:
+    """Action-SEQUENCE features (streaks, transitions, n-grams).
+
+    All are based on hero action TYPES, not sizes/pots, so they are scale-free and
+    survive the live sanitization that destroys the sizing features. This is the
+    'streak-detector' / 'handngram' signal the top miners use.
+    """
+    hands = [h for h in (group or []) if isinstance(h, dict)]
+    aggr = {"bet", "raise"}
+    all_hero = 0
+    bigrams: Counter = Counter()
+    run_shares: List[float] = []
+    transitions = switches = 0
+    aggr_after_aggr = aggr_after_any = passive_to_aggr = 0
+
+    for hand in hands:
+        meta = hand.get("metadata") if isinstance(hand.get("metadata"), dict) else {}
+        hero_seat = meta.get("hero_seat")
+        seq = [
+            str(a.get("action_type") or "").lower()
+            for a in (hand.get("actions") or [])
+            if isinstance(a, dict)
+            and a.get("actor_seat") == hero_seat
+            and str(a.get("action_type") or "").lower() in ACTION_TYPES
+        ]
+        all_hero += len(seq)
+        if seq:
+            longest = cur = 1
+            for prev, curr in zip(seq, seq[1:]):
+                transitions += 1
+                if prev == curr:
+                    cur += 1
+                    longest = max(longest, cur)
+                else:
+                    cur = 1
+                    switches += 1
+                if curr in aggr:
+                    aggr_after_any += 1
+                    if prev in aggr:
+                        aggr_after_aggr += 1
+                    else:
+                        passive_to_aggr += 1
+                bigrams[(prev, curr)] += 1
+            run_shares.append(longest / len(seq))
+
+    total_bg = max(1, sum(bigrams.values()))
+    if len(bigrams) > 1:
+        probs = [c / total_bg for c in bigrams.values()]
+        bg_entropy = -sum(p * math.log(p) for p in probs) / math.log(len(bigrams))
+    else:
+        bg_entropy = 0.0
+
+    return {
+        "seq_run_share": _safe_div(sum(run_shares), len(run_shares)),        # repetition / robotic streaks
+        "seq_switch_rate": _safe_div(switches, transitions),                 # action variability
+        "seq_bigram_entropy": bg_entropy,                                    # transition diversity
+        "seq_distinct_bigram_rate": _safe_div(len(bigrams), total_bg),
+        "seq_aggr_persist": _safe_div(aggr_after_aggr, aggr_after_any),      # multi-barrel tendency
+        "seq_passive_to_aggr": _safe_div(passive_to_aggr, transitions),      # check-raise / float moves
+        "seq_hero_actions_per_hand": _safe_div(all_hero, max(1, len(hands))),
+    }
+
+
+def _q(values: Sequence[float], p: float) -> float:
+    arr = sorted(float(v) for v in values)
+    if not arr:
+        return 0.0
+    if len(arr) == 1:
+        return arr[0]
+    idx = p * (len(arr) - 1)
+    lo = int(math.floor(idx))
+    hi = int(math.ceil(idx))
+    return arr[lo] + (arr[hi] - arr[lo]) * (idx - lo)
+
+
+def _run_max_share(seq: Sequence) -> float:
+    if not seq:
+        return 0.0
+    longest = cur = 1
+    for a, b in zip(seq, seq[1:]):
+        if a == b:
+            cur += 1
+            longest = max(longest, cur)
+        else:
+            cur = 1
+    return longest / len(seq)
+
+
+def _switch_rate(seq: Sequence) -> float:
+    if len(seq) < 2:
+        return 0.0
+    return sum(1 for a, b in zip(seq, seq[1:]) if a != b) / (len(seq) - 1)
+
+
+_PHQ_KEYS = ("act", "aggr", "fold", "call", "check", "raise",
+             "entropy", "runshare", "switch", "streets", "players")
+
+
+def _perhand_quantile_dict(group: List[dict]) -> Dict[str, float]:
+    """Per-hand hero features aggregated by QUANTILES across the chunk.
+
+    Quantiles capture the *distribution shape* of per-hand behaviour (e.g. the
+    spread/tails of per-hand aggression), which separates robotic vs human
+    variability far better than chunk-level means. Count-based keys (act, streets,
+    players) will drift with chunk/table size and get dropped by drift-select; the
+    rate/entropy/streak keys are scale-free and survive.
+    """
+    hands = [h for h in (group or []) if isinstance(h, dict)]
+    series: Dict[str, List[float]] = {k: [] for k in _PHQ_KEYS}
+    for hand in hands:
+        meta = hand.get("metadata") if isinstance(hand.get("metadata"), dict) else {}
+        hero_seat = meta.get("hero_seat")
+        players = hand.get("players") if isinstance(hand.get("players"), list) else []
+        acts = [a for a in (hand.get("actions") or []) if isinstance(a, dict) and a.get("actor_seat") == hero_seat]
+        types = [str(a.get("action_type") or "").lower() for a in acts]
+        types = [t for t in types if t in ACTION_TYPES]
+        streets = {str(a.get("street") or "").lower() for a in acts}
+        n = max(1, len(types))
+        c = Counter(types)
+        series["act"].append(float(len(types)))
+        series["aggr"].append((c.get("bet", 0) + c.get("raise", 0)) / n)
+        series["fold"].append(c.get("fold", 0) / n)
+        series["call"].append(c.get("call", 0) / n)
+        series["check"].append(c.get("check", 0) / n)
+        series["raise"].append(c.get("raise", 0) / n)
+        series["entropy"].append(_entropy([c.get(t, 0) for t in ACTION_TYPES]))
+        series["runshare"].append(_run_max_share(types))
+        series["switch"].append(_switch_rate(types))
+        series["streets"].append(float(len(streets)))
+        series["players"].append(float(len(players)))
+    out: Dict[str, float] = {}
+    for k in _PHQ_KEYS:
+        vals = series[k]
+        mean, std = _pair_mean_std(vals)
+        out[f"phq_{k}_mean"] = mean
+        out[f"phq_{k}_std"] = std
+        out[f"phq_{k}_q25"] = _q(vals, 0.25)
+        out[f"phq_{k}_q50"] = _q(vals, 0.50)
+        out[f"phq_{k}_q75"] = _q(vals, 0.75)
+        out[f"phq_{k}_max"] = _q(vals, 1.0)
+    return out
+
+
+def _signature_dict(group: List[dict]) -> Dict[str, float]:
+    """Exact-sequence repetition (bots emit identical hands; scale-free)."""
+    hands = [h for h in (group or []) if isinstance(h, dict)]
+    action_sig: List[tuple] = []
+    actor_sig: List[tuple] = []
+    for hand in hands:
+        acts = [a for a in (hand.get("actions") or []) if isinstance(a, dict)]
+        action_sig.append(tuple(str(a.get("action_type") or "").lower() for a in acts))
+        actor_sig.append(tuple(a.get("actor_seat") for a in acts))
+    n = max(1, len(hands))
+    a_counts = Counter(action_sig)
+    c_counts = Counter(actor_sig)
+    return {
+        "sig_action_top_share": (max(a_counts.values()) / n) if action_sig else 0.0,
+        "sig_action_unique_share": (len(a_counts) / n) if action_sig else 0.0,
+        "sig_actor_top_share": (max(c_counts.values()) / n) if actor_sig else 0.0,
+        "sig_actor_unique_share": (len(c_counts) / n) if actor_sig else 0.0,
+    }
+
+
 # Stable, canonical feature order (empty group yields every key with 0.0).
 _BASE_NAMES: List[str] = list(_feature_dict([]).keys())
 _EXTRA_NAMES: List[str] = list(_extra_dict([]).keys())
-FEATURE_NAMES: List[str] = _BASE_NAMES + _EXTRA_NAMES
+_SEQ_NAMES: List[str] = list(_sequence_dict([]).keys())
+_PHQ_NAMES: List[str] = list(_perhand_quantile_dict([]).keys())
+_SIG_NAMES: List[str] = list(_signature_dict([]).keys())
+FEATURE_NAMES: List[str] = _BASE_NAMES + _EXTRA_NAMES + _SEQ_NAMES + _PHQ_NAMES + _SIG_NAMES
 
 
 def extract_features(group: List[dict]) -> List[float]:
     """Return the feature vector for one chunk group, ordered by FEATURE_NAMES."""
     base = _feature_dict(group)
     extra = _extra_dict(group)
-    return [base[name] for name in _BASE_NAMES] + [extra[name] for name in _EXTRA_NAMES]
+    seq = _sequence_dict(group)
+    phq = _perhand_quantile_dict(group)
+    sig = _signature_dict(group)
+    return (
+        [base[name] for name in _BASE_NAMES]
+        + [extra[name] for name in _EXTRA_NAMES]
+        + [seq[name] for name in _SEQ_NAMES]
+        + [phq[name] for name in _PHQ_NAMES]
+        + [sig[name] for name in _SIG_NAMES]
+    )
 
 
 def extract_matrix(groups: List[List[dict]]) -> List[List[float]]:
