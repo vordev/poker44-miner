@@ -37,6 +37,8 @@ export BT_NO_PARSE_CLI_ARGS=false
 # Optional: capture unlabeled live queries for drift diagnosis (no-op unless =1).
 # Exported here so the pm2-spawned miner inherits it.
 export POKER44_CAPTURE="${POKER44_CAPTURE:-}"
+# Experiment: invert model output (1 - score) if the model ranks backwards live.
+export POKER44_INVERT_SCORES="${POKER44_INVERT_SCORES:-}"
 
 # --- Model manifest identity (published to validators for transparency/compliance) ---
 # Auto-derived from git; override by exporting these before running the script.

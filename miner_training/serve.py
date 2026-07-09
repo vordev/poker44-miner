@@ -18,6 +18,7 @@ miner still returns a valid, length-matched response instead of crashing.
 """
 from __future__ import annotations
 
+import os
 import pickle
 from pathlib import Path
 from typing import List, Optional
@@ -32,6 +33,9 @@ class ModelScorer:
         self.model = None
         self.feature_names: List[str] = FEATURE_NAMES
         self._idx: List[int] = list(range(len(FEATURE_NAMES)))
+        # Experiment flag: if the model ranks backwards on live (AP<0.5), inverting
+        # the output (1 - p) corrects it. Reversible via env, no retrain needed.
+        self.invert = os.getenv("POKER44_INVERT_SCORES", "").strip().lower() in {"1", "true", "yes", "on"}
         path = Path(model_path)
         if path.exists():
             with path.open("rb") as fh:
@@ -52,11 +56,14 @@ class ModelScorer:
         full = extract_features(group)
         return [full[i] for i in self._idx]
 
+    def _finalize(self, proba: float) -> float:
+        p = (1.0 - proba) if self.invert else proba
+        return round(float(min(1.0, max(0.0, p))), 6)
+
     def score_chunk(self, group: List[dict]) -> float:
         if self.model is None:
             return 0.5
-        proba = self.model.predict_proba([self._vec(group)])[0][1]
-        return round(float(min(1.0, max(0.0, proba))), 6)
+        return self._finalize(self.model.predict_proba([self._vec(group)])[0][1])
 
     def score_chunks(self, chunks: List[List[dict]]) -> List[float]:
         """One score per chunk; length always matches len(chunks)."""
@@ -66,7 +73,7 @@ class ModelScorer:
             return []
         matrix = [self._vec(g) for g in chunks]
         proba = self.model.predict_proba(matrix)[:, 1]
-        return [round(float(min(1.0, max(0.0, p))), 6) for p in proba]
+        return [self._finalize(p) for p in proba]
 
 
 _DEFAULT: Optional[ModelScorer] = None
